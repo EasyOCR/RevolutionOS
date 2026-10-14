@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# multisober: launch Sober instances by Roblox account instead of by internal instance
+# name. Internal names (test1, acct1, ...) are an implementation detail from here on -
+# this is the actual user-facing entry point.
+#
+#   multisober launch <username>   - launch the instance already logged in as that account
+#   multisober addinstance         - create a new instance and launch it to log in fresh
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/lib.sh"
+
+usage() {
+    echo "Usage: multisober launch <username>" >&2
+    echo "       multisober addinstance" >&2
+    exit 1
+}
+
+[ $# -ge 1 ] || usage
+CMD="$1"; shift
+
+case "$CMD" in
+    launch)
+        [ $# -eq 1 ] || usage
+        USERNAME="$1"
+        MATCH="$(find_instance_by_username "$USERNAME")"
+        if [ -z "$MATCH" ]; then
+            echo "No instance is logged in as '$USERNAME'." >&2
+            echo "Run 'multisober addinstance' to log into a new account." >&2
+            exit 1
+        fi
+        echo "Launching @$USERNAME (instance '$MATCH')..."
+        exec "$SCRIPT_DIR/start-instance.sh" "$MATCH" --visible
+        ;;
+    addinstance)
+        [ $# -eq 0 ] || usage
+        NAME="$(next_auto_instance_name)"
+        "$SCRIPT_DIR/create-instance.sh" "$NAME"
+        echo "Launching a fresh instance - log into the new Roblox account in the window that opens."
+        exec "$SCRIPT_DIR/start-instance.sh" "$NAME" --visible
+        ;;
+    *)
+        usage
+        ;;
+esac

@@ -1,0 +1,82 @@
+# Builds and pushes the RevolutionOS OCI image to GHCR. Adapted from (a
+# simplified version of) ublue-os/image-template's build.yml - that one uses
+# `just` as a command-runner abstraction and adds rechunking; this version
+# skips both for a first pass and calls podman directly. Revisit once this
+# has actually been proven to build successfully.
+#
+# NOT YET RUN. This workflow has not been triggered - "the image builds in
+# CI" is unverified.
+name: build-revolutionos-image
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "image/**"
+      - "ui/**"
+      - "scripts/orchestrator/**"
+  workflow_dispatch:
+
+env:
+  IMAGE_NAME: revolutionos
+  IMAGE_REGISTRY: ghcr.io/${{ github.repository_owner }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Maximize build space
+        uses: easimon/maximize-build-space@master
+        with:
+          root-reserve-mb: 8192
+          remove-dotnet: true
+          remove-android: true
+          remove-haskell: true
+
+      - name: Build image
+        id: build
+        uses: redhat-actions/buildah-build@v2
+        with:
+          image: ${{ env.IMAGE_NAME }}
+          tags: latest ${{ github.sha }}
+          # Context is the repo root, not image/ - the Containerfile's
+          # ui-builder stage needs to reach ui/ and scripts/ as siblings.
+          context: .
+          containerfiles: image/Containerfile
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: redhat-actions/podman-login@v1
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push to GHCR
+        if: github.event_name != 'pull_request'
+        id: push
+        uses: redhat-actions/push-to-registry@v2
+        with:
+          image: ${{ steps.build.outputs.image }}
+          tags: ${{ steps.build.outputs.tags }}
+          registry: ${{ env.IMAGE_REGISTRY }}
+
+      - name: Install cosign
+        if: github.event_name != 'pull_request'
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign image
+        if: github.event_name != 'pull_request'
+        run: |
+          cosign sign -y --key env://COSIGN_PRIVATE_KEY "${IMAGE_REGISTRY}/${IMAGE_NAME}@${{ steps.push.outputs.digest }}"
+        env:
+          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
+          # NOTE: signing needs a real cosign keypair generated and its
+          # private half stored as this repo secret - not set up yet.

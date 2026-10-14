@@ -1,0 +1,29 @@
+[terminal]
+vt = 1
+
+# Overrides the package default (agreety --cmd /bin/sh) with RevolutionOS's
+# own Wails-rendered greeter (see greeter/ at the repo root) - it speaks
+# greetd's IPC protocol directly (greeter/greetd.go) and starts GNOME
+# Flashback/Metacity itself on a successful login (greeter/app.go), so there's
+# no separate "session command" configured here the way agreety's --cmd
+# works - our greeter is responsible for the whole exchange.
+#
+# Wrapped in `cage` (a minimal Wayland kiosk compositor) rather than executed
+# directly - confirmed by a real VM boot crash (2026-09-27) that greetd
+# launches the greeter on a bare VT with no display server running at all, so
+# our GTK/WebKit-based Wails binary panics ("failed to init GTK") with
+# nothing to connect to. `agreety` (the package default) never hits this
+# because it's a plain TTY prompt needing no display.
+#
+# Tried `startx`/Xorg first since the rest of the product is X11-only
+# (Flashback/Metacity, RevolutionMacro's Wayland support isn't reliable per
+# Liam) - but that's a decision about the *user session after login*, a
+# completely separate greetd-managed process from the greeter itself. The
+# greeter doesn't do any of the X11-specific things the panel does (no EWMH
+# dock-claiming), so there's no actual requirement it run under X11 too, and
+# graphical greetd greeters are overwhelmingly documented/supported via a
+# Wayland kiosk compositor (cage) rather than startx - confirmed X11 is the
+# much less-trodden path here. `-s` allows VT switching.
+[default_session]
+command = "cage -s -- /usr/libexec/revolutionos/revolutionos-greeter"
+user = "greetd"

@@ -1,0 +1,5 @@
+# Liam's proprietary RevolutionMacro .flatpak bundle goes here for local
+# builds - not committed (not ours to redistribute without his explicit OK).
+# See build_files/build.sh for how it's used.
+*.flatpak
+!.gitignore

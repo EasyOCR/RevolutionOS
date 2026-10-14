@@ -1,0 +1,109 @@
+# RevolutionOS image definition.
+#
+# Follows the standard ublue-os/image-template pattern (Containerfile + build.sh
+# + disk_config/*.toml), layered on ublue-os/base-nvidia rather than bare
+# Fedora Atomic - see PROJECT.md for why (NVIDIA driver packaging, flatpak-
+# native app model, atomic rollback, all already solved there, without
+# Bazzite's gaming/desktop-specific opinions on top - see the base image's
+# own comment below for the fuller reasoning behind that switch).
+#
+# Build context is the REPO ROOT (not this image/ dir), so this Containerfile
+# can also reach ui/ and scripts/ as siblings - see .github/workflows/build.yml.
+#
+# NOT YET BUILT OR BOOT-TESTED. This defines the image; it hasn't actually
+# been built in CI or booted anywhere yet.
+
+FROM scratch AS ctx
+# CACHEBUST: podman was observed reusing a stale cached layer for the
+# COPY image/system_files step below even after its content genuinely
+# changed (confirmed 2026-09-27 - a rebuild produced the byte-identical
+# image ID/timestamp as before, and the built image's own
+# revolutionos-panel.service was missing an edit already present on disk).
+# This ARG forces a fresh COPY on every build that passes
+# --build-arg CACHEBUST=$(date +%s) - it does NOT invalidate the
+# ui-builder/panel-builder/greeter-builder stages, which don't reference
+# it or depend on ctx at all, so their expensive Go/Wails/npm compiles
+# still cache normally.
+ARG CACHEBUST
+COPY image/build_files /
+COPY image/system_files /system_files
+COPY image/local-assets /local-assets
+COPY scripts/orchestrator /orchestrator-src
+
+# Builds the RevolutionOS orchestrator (Wails: Go backend + React/Mantine
+# frontend) from source. Needs go/node/webkit2gtk-devel, none of which belong
+# in the final image - kept in this separate stage so only the compiled
+# binary gets copied over. Verified working (2026-09-24, built successfully
+# in a distrobox on the dev machine using this same webkit2_41 tag, needed
+# since this Fedora release only ships webkit2gtk-4.1, not the older 4.0
+# Wails defaults to).
+FROM fedora:42 AS ui-builder
+RUN dnf install -y golang nodejs npm gcc gcc-c++ pkgconf-pkg-config gtk3-devel webkit2gtk4.1-devel
+COPY ui /build/ui
+WORKDIR /build/ui
+RUN go install github.com/wailsapp/wails/v2/cmd/wails@latest
+RUN "$HOME/go/bin/wails" build -tags webkit2_41 -o revolutionos
+
+# Same builder image, building panel/ instead - the Wails app that claims the
+# GNOME Flashback panel role (dock type + strut reservation, see panel/app.go
+# and PROJECT.md's panel section). Kept as a separate stage from ui-builder
+# (rather than building both in one) so a change to one doesn't invalidate the
+# other's build cache.
+FROM fedora:42 AS panel-builder
+RUN dnf install -y golang nodejs npm gcc gcc-c++ pkgconf-pkg-config gtk3-devel webkit2gtk4.1-devel
+# Same CACHEBUST as the ctx stage - COPY-based cache invalidation for this
+# stage wasn't independently verified trustworthy, so don't assume it.
+ARG CACHEBUST
+COPY panel /build/panel
+WORKDIR /build/panel
+RUN go install github.com/wailsapp/wails/v2/cmd/wails@latest
+RUN "$HOME/go/bin/wails" build -tags webkit2_41 -o revolutionos-panel
+
+# Same builder image again, building greeter/ - the Wails app that replaces
+# GDM entirely as the login screen (see PROJECT.md's 2026-09-27 greetd
+# section and greeter/greetd.go). Launched directly by greetd per
+# system_files' /etc/greetd/config.toml override, not started as a session
+# service the way panel/orchestrator are.
+FROM fedora:42 AS greeter-builder
+RUN dnf install -y golang nodejs npm gcc gcc-c++ pkgconf-pkg-config gtk3-devel webkit2gtk4.1-devel
+COPY greeter /build/greeter
+WORKDIR /build/greeter
+RUN go install github.com/wailsapp/wails/v2/cmd/wails@latest
+RUN "$HOME/go/bin/wails" build -tags webkit2_41 -o revolutionos-greeter
+
+# base-nvidia (2026-09-27): switched off Bazzite. RevolutionOS replaces the
+# entire UI layer itself now (custom Wails panel, system menu, tray, and
+# greeter - see greeter/), so Bazzite's own desktop/gaming opinions (gamescope,
+# controller udev rules, preinstalled Steam/Lutris, emulation tooling) are
+# pure dead weight we'd otherwise have to work around, as already happened
+# once this session (the gnome-panel Wants= override, the wrong default
+# session GDM picked up). base-nvidia is ublue-os's own minimal Fedora Atomic
+# base - RPMFusion + non-free codecs + their NVIDIA akmod pipeline, no
+# desktop-environment opinions at all.
+#
+# Tradeoff worth knowing: unlike bazzite-gnome-nvidia-open, there is no
+# "-open" variant of base-nvidia (confirmed - only base-nvidia exists), so
+# this pulls the closed/proprietary NVIDIA kernel modules rather than the
+# open-source ones the dev machine's RTX 3080 (Ampere) actually qualifies
+# for. The open modules were a deliberate earlier choice (easier to keep
+# building across kernel updates than the closed akmod path - see the
+# homelab-hardware-planning conversation-history note). Revisit if closed-
+# module akmod build reliability becomes a real problem in practice.
+FROM ghcr.io/ublue-os/base-nvidia:latest
+
+COPY --from=ui-builder /build/ui/build/bin/revolutionos /usr/libexec/revolutionos/revolutionos
+COPY --from=panel-builder /build/panel/build/bin/revolutionos-panel /usr/libexec/revolutionos/revolutionos-panel
+COPY --from=greeter-builder /build/greeter/build/bin/revolutionos-greeter /usr/libexec/revolutionos/revolutionos-greeter
+
+### Off by default - only pulled in when explicitly building a dev/test image
+### (--build-arg DEV_BUILD=1). Keeps the real product image lean; see build.sh
+### for what this actually installs.
+ARG DEV_BUILD=0
+
+RUN --mount=type=bind,from=ctx,source=/,target=/ctx \
+    --mount=type=cache,dst=/var/cache \
+    --mount=type=cache,dst=/var/log \
+    --mount=type=tmpfs,dst=/tmp \
+    /ctx/build.sh
+
+RUN bootc container lint

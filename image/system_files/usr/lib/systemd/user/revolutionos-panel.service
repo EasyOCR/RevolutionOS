@@ -1,0 +1,47 @@
+[Unit]
+Description=RevolutionOS Panel
+After=graphical-session.target
+Requisite=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+Slice=session.slice
+# Software rendering fallback - confirmed via a real VM run (2026-09-27) that
+# this X11 session (unlike the greeter's cage/Wayland session, which renders
+# fine) hits "MESA-EGL: DRI3 error: Could not get DRI3 device" under QEMU's
+# virtio-gpu, leaving the panel's dock window claimed (visible as an empty
+# bar) but its WebKit content never painted. Real hardware with a working GPU
+# shouldn't need this, but forcing it costs little there and fixes VM testing.
+#
+# WEBKIT_DISABLE_COMPOSITING_MODE=1 was tried first and dropped - it silenced
+# the DRI3 warning but content still never painted, and disabling compositing
+# outright is known to blank-page some WebKitGTK versions rather than fix
+# them (removes a code path rather than giving it a software backend).
+# WEBKIT_DISABLE_DMABUF_RENDERER=1 targets the actual known failure mode for
+# WebKitGTK under QEMU virtio-gpu specifically: DMA-BUF buffer sharing
+# between WebKit's accelerated compositor and the GPU fails silently (no log
+# output - confirmed nothing WebKit-related appears in the journal beyond
+# normal startup), leaving a real, non-crashed process with nothing ever
+# painted into its window.
+Environment=LIBGL_ALWAYS_SOFTWARE=1
+Environment=WEBKIT_DISABLE_DMABUF_RENDERER=1
+# Neither rendering fix above actually resolved the blank content (confirmed
+# via a third real VM test, 2026-09-27) - both were reasonable, evidenced
+# guesses that turned out insufficient. Rather than guess a fourth flag
+# blind, WEBKIT_DEBUG=all forces WebKit's own internal diagnostic logging to
+# stderr (captured by journald same as everything else this service prints)
+# so the actual failure can be read directly instead of inferred.
+Environment=WEBKIT_DEBUG=all
+Environment=G_MESSAGES_DEBUG=all
+# RULED OUT (2026-09-30): GDK_DEBUG=all added here to target the WebKit-
+# surface/GDK-compositing boundary, then removed - it produced zero "Gdk"-
+# prefixed output on a real VM run, vs. WEBKIT_DEBUG=all which worked fine
+# in the same service. This distro's GTK3 package almost certainly wasn't
+# built with debug hooks enabled, so the var is silently ignored - a
+# debug-enabled GTK rebuild would be a much bigger lift than this env var,
+# not attempted. Don't re-add this without a GTK build that actually
+# honors it.
+ExecStart=/usr/libexec/revolutionos/revolutionos-panel
+Restart=on-failure
+RestartSec=1
