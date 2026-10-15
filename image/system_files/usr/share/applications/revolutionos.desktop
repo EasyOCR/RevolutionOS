@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=RevolutionOS
+Comment=Manage multiple Revolution Macro accounts
+Exec=/usr/libexec/revolutionos/revolutionos
+Icon=revolutionos
+Terminal=false
+Categories=Utility;

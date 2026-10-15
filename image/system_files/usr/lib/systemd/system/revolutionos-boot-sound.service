@@ -1,0 +1,13 @@
+[Unit]
+Description=RevolutionOS boot sound
+DefaultDependencies=no
+After=sound.target
+Before=greetd.service
+
+[Service]
+Type=simple
+ExecStart=/usr/libexec/revolutionos/boot-sound.sh
+TimeoutStopSec=5
+
+[Install]
+WantedBy=multi-user.target

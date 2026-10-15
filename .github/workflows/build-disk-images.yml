@@ -1,0 +1,142 @@
+# Builds the RevolutionOS qcow2 (VM disk) and ISO (install media) artifacts
+# via bootc-image-builder. The bootc-image-builder invocations themselves
+# (flags, mounts, --rootfs ext4) are the exact commands validated by hand on
+# 2026-10-14 against an already-built image (see PROJECT.md - "virgl
+# acceleration..." section for the ISO-specific bugs found and fixed that
+# day: missing --rootfs ext4, and a kickstart that referenced a registry
+# image that doesn't actually exist). The container-build step ahead of it is
+# new here, not something run by hand this session - it follows the same
+# Containerfile/context build-revolutionos-image.yml already uses, just via
+# plain podman instead of that workflow's action (see below for why).
+#
+# Each job builds its own copy of the container image with a plain `sudo
+# podman build` rather than reusing build-revolutionos-image.yml's
+# redhat-actions/buildah-build step. That action runs rootless, storing the
+# image under the runner user's own containers-storage - but bootc-image-
+# builder needs privileged/root access (loop devices, partitioning), so it
+# has to run via sudo. Mixing the two means the sudo'd bootc-image-builder
+# step looks in root's (empty) store and can't find an image a rootless step
+# built - the exact rootless/rootful split that caused repeated local build
+# failures this project hit throughout 2026-10. Keeping everything under
+# `sudo podman` end to end in each job sidesteps that entirely. Costs an
+# extra container build per job (two total instead of one shared image) -
+# revisit if that ever becomes a real time/cost problem.
+#
+# NOT YET RUN. Like build-revolutionos-image.yml, this is unverified in
+# GitHub Actions specifically - "it builds" has only been confirmed by hand
+# on a local dev machine, using the exact commands these jobs wrap.
+name: build-disk-images
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "image/**"
+      - "ui/**"
+  workflow_dispatch:
+
+jobs:
+  build-qcow2:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Maximize build space
+        uses: easimon/maximize-build-space@master
+        with:
+          root-reserve-mb: 10240
+          remove-dotnet: true
+          remove-android: true
+          remove-haskell: true
+
+      - name: Build container image (local only, not pushed to GHCR)
+        # --secret for github_token - see Containerfile's comment on its
+        # final RUN step and build.yml's own build step for the full reasoning.
+        run: |
+          echo -n "${{ secrets.PRECISE_INPUT_PAT }}" > /tmp/github_token
+          sudo podman build \
+            -t localhost/revolutionos:latest \
+            --secret id=github_token,src=/tmp/github_token \
+            -f image/Containerfile .
+          rm -f /tmp/github_token
+
+      - name: Build qcow2
+        run: |
+          mkdir -p output
+          sudo podman run \
+            --rm \
+            --privileged \
+            --security-opt label=type:unconfined_t \
+            -v /var/lib/containers/storage:/var/lib/containers/storage \
+            -v "$(pwd)/output:/output" \
+            quay.io/centos-bootc/bootc-image-builder:latest \
+            --type qcow2 \
+            --rootfs ext4 \
+            localhost/revolutionos:latest
+          sudo chown -R "$(id -u):$(id -g)" output
+
+      - name: Upload qcow2 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: revolutionos-qcow2
+          path: output/qcow2/disk.qcow2
+          # Multi-GB artifact, and there's no longer-term hosting wired up
+          # yet (the revolutionmacro.com install/update endpoints from the
+          # launch plan aren't live) - keep retention short so this doesn't
+          # quietly eat the repo's Actions storage quota.
+          retention-days: 7
+
+  build-iso:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Maximize build space
+        uses: easimon/maximize-build-space@master
+        with:
+          root-reserve-mb: 10240
+          remove-dotnet: true
+          remove-android: true
+          remove-haskell: true
+
+      - name: Build container image (local only, not pushed to GHCR)
+        # --secret for github_token - see Containerfile's comment on its
+        # final RUN step and build.yml's own build step for the full reasoning.
+        run: |
+          echo -n "${{ secrets.PRECISE_INPUT_PAT }}" > /tmp/github_token
+          sudo podman build \
+            -t localhost/revolutionos:latest \
+            --secret id=github_token,src=/tmp/github_token \
+            -f image/Containerfile .
+          rm -f /tmp/github_token
+
+      - name: Build install ISO
+        run: |
+          mkdir -p output
+          sudo podman run \
+            --rm \
+            --privileged \
+            --security-opt label=type:unconfined_t \
+            -v /var/lib/containers/storage:/var/lib/containers/storage \
+            -v "$(pwd)/output:/output" \
+            -v "$(pwd)/image/disk_config/iso-gnome.toml:/config.toml:ro" \
+            quay.io/centos-bootc/bootc-image-builder:latest \
+            --type iso \
+            --config /config.toml \
+            --rootfs ext4 \
+            localhost/revolutionos:latest
+          sudo chown -R "$(id -u):$(id -g)" output
+
+      - name: Upload ISO artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: revolutionos-iso
+          path: output/bootiso/install.iso
+          # Same storage-quota reasoning as the qcow2 job above.
+          retention-days: 7

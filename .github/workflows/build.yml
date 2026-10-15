@@ -1,0 +1,83 @@
+# Builds and pushes the RevolutionOS OCI image to GHCR. Adapted from (a
+# simplified version of) ublue-os/image-template's build.yml - that one uses
+# `just` as a command-runner abstraction and adds rechunking; this version
+# skips both for a first pass and calls podman directly. Revisit once this
+# has actually been proven to build successfully.
+#
+# NOT YET RUN. This workflow has not been triggered - "the image builds in
+# CI" is unverified.
+name: build-revolutionos-image
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "image/**"
+      - "ui/**"
+  workflow_dispatch:
+
+env:
+  IMAGE_NAME: revolutionos
+  IMAGE_REGISTRY: ghcr.io/${{ github.repository_owner }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Maximize build space
+        uses: easimon/maximize-build-space@master
+        with:
+          root-reserve-mb: 8192
+          remove-dotnet: true
+          remove-android: true
+          remove-haskell: true
+
+      - name: Build image
+        id: build
+        # Plain podman rather than redhat-actions/buildah-build - that
+        # action's secret-passing support isn't something this project has
+        # confirmed works, and the Containerfile's final RUN step needs a
+        # real --secret mount for github_token (read-only PAT for the
+        # private EasyOCR/precise-input repo build.sh clones the orchestrator
+        # from - see that file). PRECISE_INPUT_PAT needs to actually exist as
+        # a repo secret before this runs for real - not set up yet.
+        run: |
+          echo -n "${{ secrets.PRECISE_INPUT_PAT }}" > /tmp/github_token
+          sudo podman build \
+            -t "${IMAGE_NAME}:latest" -t "${IMAGE_NAME}:${{ github.sha }}" \
+            --secret id=github_token,src=/tmp/github_token \
+            -f image/Containerfile .
+          rm -f /tmp/github_token
+
+      - name: Push to GHCR
+        if: github.event_name != 'pull_request'
+        id: push
+        # Plain podman push, same reasoning as the build step above - keeps
+        # this in sync with a manual `sudo podman build` output rather than
+        # mixing in an action that expects to have done the build itself.
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | sudo podman login ghcr.io -u "${{ github.actor }}" --password-stdin
+          sudo podman push "${IMAGE_NAME}:latest" "${IMAGE_REGISTRY}/${IMAGE_NAME}:latest"
+          sudo podman push "${IMAGE_NAME}:${{ github.sha }}" "${IMAGE_REGISTRY}/${IMAGE_NAME}:${{ github.sha }}"
+          digest=$(sudo podman inspect "${IMAGE_REGISTRY}/${IMAGE_NAME}:latest" --format '{{.Digest}}')
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+
+      - name: Install cosign
+        if: github.event_name != 'pull_request'
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign image
+        if: github.event_name != 'pull_request'
+        run: |
+          cosign sign -y --key env://COSIGN_PRIVATE_KEY "${IMAGE_REGISTRY}/${IMAGE_NAME}@${{ steps.push.outputs.digest }}"
+        env:
+          COSIGN_PRIVATE_KEY: ${{ secrets.COSIGN_PRIVATE_KEY }}
+          # NOTE: signing needs a real cosign keypair generated and its
+          # private half stored as this repo secret - not set up yet.
